@@ -1,0 +1,48 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.eggs/
+*.egg
+.venv/
+venv/
+env/
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb_checkpoints
+
+# Data (never commit raw data or splits)
+data/
+*.csv
+*.jsonl
+*.parquet
+
+# Model outputs / checkpoints
+outputs/
+*.bin
+*.safetensors
+*.pt
+*.pth
+
+# Secrets / credentials
+.env
+*.key
+credentials.json
+service_account*.json
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+
+# Logs
+logs/
+*.log
+wandb/

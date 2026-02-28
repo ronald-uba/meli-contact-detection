@@ -1,0 +1,42 @@
+seed: 42
+
+pools:
+  raw:
+    file: "raw_100k.csv"
+    total: 100000
+    dc_rate: 0.015
+    train: 49000
+    val:   21000
+    test:  30000
+
+  positive:
+    file: "positives_14k.csv"
+    total: 14000
+    train: 13000
+    val:   1000
+    test:  0          # test usa SOLO raw, sin enriquecimiento
+
+  hard_negative:
+    file: "hard_negatives_7k.csv"
+    total: 7000
+    train: 4900
+    val:   2100
+    test:  0          # test usa SOLO raw, sin enriquecimiento
+
+# Valores esperados para validación automática en build_splits.py
+expected:
+  train:
+    total:     66900
+    dc_rate:   0.2053
+    positives: 13735  # 49k*0.015 + 13k = 735 + 13000
+  val:
+    total:     24100
+    dc_rate:   0.0546
+    positives: 1315   # 21k*0.015 + 1k = 315 + 1000
+  test:
+    total:     30000
+    dc_rate:   0.015
+    positives: 450    # 30k*0.015
+
+# ADVERTENCIA: test.csv no debe usarse hasta Sprint 10
+test_locked: true
