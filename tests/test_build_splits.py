@@ -13,7 +13,7 @@ import pandas as pd
 import pytest
 import yaml
 
-from src.data.build_splits import build_splits, load_config
+from src.data.build_splits import build_splits, load_config, _validate
 
 
 @pytest.fixture

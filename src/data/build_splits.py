@@ -12,10 +12,11 @@ Uso:
 """
 
 import argparse
-import yaml
-import pandas as pd
-import numpy as np
 from pathlib import Path
+
+import pandas as pd
+import yaml
+from sklearn.model_selection import train_test_split
 
 
 def load_config(config_path: str) -> dict:
@@ -23,20 +24,10 @@ def load_config(config_path: str) -> dict:
         return yaml.safe_load(f)
 
 
-def sample_stratified(df: pd.DataFrame, n: int, label_col: str, seed: int) -> pd.DataFrame:
-    """Muestrea n filas preservando la proporción de clases."""
-    return (
-        df.groupby(label_col, group_keys=False)
-          .apply(lambda g: g.sample(frac=n / len(df), random_state=seed))
-          .sample(frac=1, random_state=seed)  # shuffle
-          .reset_index(drop=True)
-    )
-
-
 def build_splits(config_path: str, pools_dir: str, output_dir: str) -> None:
     cfg = load_config(config_path)
     seed = cfg["seed"]
-    rng = np.random.default_rng(seed)
+    label_col = "RESULT"
 
     pools_dir = Path(pools_dir)
     output_dir = Path(output_dir)
@@ -44,41 +35,61 @@ def build_splits(config_path: str, pools_dir: str, output_dir: str) -> None:
 
     # ── Cargar pools ──────────────────────────────────────────────────────────
     print("Cargando pools...")
-    raw = pd.read_csv(pools_dir / cfg["pools"]["raw"]["file"])
-    pos = pd.read_csv(pools_dir / cfg["pools"]["positive"]["file"])
+    raw      = pd.read_csv(pools_dir / cfg["pools"]["raw"]["file"])
+    pos      = pd.read_csv(pools_dir / cfg["pools"]["positive"]["file"])
     hard_neg = pd.read_csv(pools_dir / cfg["pools"]["hard_negative"]["file"])
 
-    label_col = "RESULT"
+    print(f"  raw      : {len(raw):>7,} filas  ({raw[label_col].mean():.2%} DC)")
+    print(f"  positivos: {len(pos):>7,} filas  ({pos[label_col].mean():.2%} DC)")
+    print(f"  hard_neg : {len(hard_neg):>7,} filas  ({hard_neg[label_col].mean():.2%} DC)")
 
-    # ── Muestrar raw pool (estratificado para preservar 1.5% DC) ─────────────
+    # ── Dividir raw pool (estratificado para preservar 1.5% DC) ──────────────
     raw_cfg = cfg["pools"]["raw"]
-    raw_train = sample_stratified(raw, raw_cfg["train"], label_col, seed)
-    raw_val   = sample_stratified(
-        raw.drop(raw_train.index), raw_cfg["val"], label_col, seed
-    )
-    raw_test  = sample_stratified(
-        raw.drop(raw_train.index).drop(raw_val.index), raw_cfg["test"], label_col, seed
+
+    # Paso 1: separar test del resto (trainval), estratificado por RESULT
+    raw_trainval, raw_test = train_test_split(
+        raw,
+        test_size=raw_cfg["test"],
+        stratify=raw[label_col],
+        random_state=seed,
     )
 
-    # ── Muestrar positivos ────────────────────────────────────────────────────
+    # Paso 2: separar train y val del trainval, estratificado por RESULT
+    raw_train, raw_val = train_test_split(
+        raw_trainval,
+        test_size=raw_cfg["val"],
+        stratify=raw_trainval[label_col],
+        random_state=seed,
+    )
+
+    # ── Dividir pool de positivos ─────────────────────────────────────────────
+    # Todos son DC=1 → no hace falta estratificar
     pos_cfg = cfg["pools"]["positive"]
     pos_train = pos.sample(n=pos_cfg["train"], random_state=seed)
     pos_val   = pos.drop(pos_train.index).sample(n=pos_cfg["val"], random_state=seed)
 
-    # ── Muestrar hard negatives ───────────────────────────────────────────────
+    # ── Dividir hard negatives ────────────────────────────────────────────────
+    # Todos son DC=0 → no hace falta estratificar
     hn_cfg = cfg["pools"]["hard_negative"]
     hn_train = hard_neg.sample(n=hn_cfg["train"], random_state=seed)
     hn_val   = hard_neg.drop(hn_train.index).sample(n=hn_cfg["val"], random_state=seed)
 
     # ── Concatenar y shufflear ────────────────────────────────────────────────
-    train = pd.concat([raw_train, pos_train, hn_train]).sample(frac=1, random_state=seed).reset_index(drop=True)
-    val   = pd.concat([raw_val,   pos_val,   hn_val  ]).sample(frac=1, random_state=seed).reset_index(drop=True)
+    train = (pd.concat([raw_train, pos_train, hn_train])
+               .sample(frac=1, random_state=seed)
+               .reset_index(drop=True))
+    val   = (pd.concat([raw_val, pos_val, hn_val])
+               .sample(frac=1, random_state=seed)
+               .reset_index(drop=True))
     test  = raw_test.sample(frac=1, random_state=seed).reset_index(drop=True)
 
+    # ── Verificar que no hay solapamiento de item_id ──────────────────────────
+    _check_no_overlap(train, val, test)
+
     # ── Validar contra valores esperados ─────────────────────────────────────
-    _validate(train, cfg["expected"]["train"], "train")
-    _validate(val,   cfg["expected"]["val"],   "val")
-    _validate(test,  cfg["expected"]["test"],  "test")
+    _validate(train, cfg["expected"]["train"], "train", label_col)
+    _validate(val,   cfg["expected"]["val"],   "val",   label_col)
+    _validate(test,  cfg["expected"]["test"],  "test",  label_col)
 
     # ── Guardar ───────────────────────────────────────────────────────────────
     train.to_csv(output_dir / "train.csv", index=False)
@@ -89,27 +100,41 @@ def build_splits(config_path: str, pools_dir: str, output_dir: str) -> None:
     print(f"   train : {len(train):>6,} filas  ({train[label_col].mean():.2%} DC)")
     print(f"   val   : {len(val):>6,} filas  ({val[label_col].mean():.2%} DC)")
     print(f"   test  : {len(test):>6,} filas  ({test[label_col].mean():.2%} DC)")
-    print("\n⚠️  test.csv no debe usarse hasta Sprint 10.")
+    print("\n⚠️  test.csv NO debe usarse hasta Sprint 10.")
 
 
-def _validate(df: pd.DataFrame, expected: dict, split_name: str) -> None:
-    label_col = "RESULT"
+def _check_no_overlap(train: pd.DataFrame, val: pd.DataFrame, test: pd.DataFrame) -> None:
+    id_col = "item_id"
+    if id_col not in train.columns:
+        return  # Si no hay item_id, salteamos la verificación
+    t, v, te = set(train[id_col]), set(val[id_col]), set(test[id_col])
+    overlaps = {
+        "train∩val":  len(t & v),
+        "train∩test": len(t & te),
+        "val∩test":   len(v & te),
+    }
+    for k, n in overlaps.items():
+        if n > 0:
+            raise ValueError(f"Solapamiento detectado: {k} = {n} items")
+    print("✓  Sin solapamiento entre splits")
+
+
+def _validate(df: pd.DataFrame, expected: dict, split_name: str, label_col: str) -> None:
     actual_total = len(df)
     actual_dc    = df[label_col].mean()
-    actual_pos   = df[label_col].sum()
 
     tol_total = 0.01   # 1% tolerancia en cantidad
     tol_dc    = 0.005  # 0.5pp tolerancia en tasa DC
 
     ok = True
     if abs(actual_total - expected["total"]) / expected["total"] > tol_total:
-        print(f"⚠️  [{split_name}] total: esperado {expected['total']}, obtenido {actual_total}")
+        print(f"⚠️  [{split_name}] total: esperado {expected['total']:,}, obtenido {actual_total:,}")
         ok = False
     if abs(actual_dc - expected["dc_rate"]) > tol_dc:
         print(f"⚠️  [{split_name}] dc_rate: esperado {expected['dc_rate']:.4f}, obtenido {actual_dc:.4f}")
         ok = False
     if ok:
-        print(f"✓  [{split_name}] validación OK — {actual_total:,} filas, {actual_dc:.2%} DC")
+        print(f"✓  [{split_name}] OK — {actual_total:,} filas, {actual_dc:.2%} DC")
 
 
 if __name__ == "__main__":
