@@ -1,83 +1,219 @@
 """
 dataset.py
 ----------
-Carga un CSV de listings y construye un HuggingFace Dataset multimodal.
+Carga un CSV de listings MeLi y construye un HuggingFace Dataset multimodal.
 Cada ejemplo incluye rutas a imágenes descargadas, texto del prompt y la respuesta esperada.
 """
 
+import ast
 import json
-import os
+import random
 import re
-import requests
+from io import BytesIO
 from pathlib import Path
 from typing import Optional
 
 import pandas as pd
+import requests
 from datasets import Dataset
+from PIL import Image
 
 
-PROMPT_TEMPLATE = """Analizá las imágenes y el texto de esta publicación de Mercado Libre.
-Determiná si contiene datos de contacto como teléfonos, WhatsApp, URLs u otros medios de contacto directo.
+# ── Constantes ────────────────────────────────────────────────────────────────
 
-Título: {title}
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+    "Accept": "image/*,*/*;q=0.8",
+    "Referer": "https://www.mercadolibre.com/",
+}
 
-Descripción: {description}
-
-Respondé SOLO con un JSON válido:
-{{"resultado": "DC-adrede" | "DC-involuntario" | "DC-negativo", "explicacion": "..."}}"""
-
-
-def download_images(
-    urls: list[str],
-    item_id: str,
-    img_dir: Path,
-    max_images: int = 10,
-) -> list[str]:
-    """Descarga hasta max_images imágenes y retorna sus paths locales."""
-    img_dir.mkdir(parents=True, exist_ok=True)
-    paths = []
-    for i, url in enumerate(urls[:max_images]):
-        ext = url.split(".")[-1].split("?")[0] or "jpg"
-        dest = img_dir / f"{item_id}_{i}.{ext}"
-        if not dest.exists():
-            try:
-                r = requests.get(url, timeout=10)
-                r.raise_for_status()
-                dest.write_bytes(r.content)
-            except Exception as e:
-                print(f"⚠️  Error descargando {url}: {e}")
-                continue
-        paths.append(str(dest))
-    return paths
+PROMPT_TEMPLATE = (
+    "You are detecting contact data or evasion signals in marketplace listings.\n"
+    "Return ONLY valid JSON (no markdown, no code fences, no extra text).\n"
+    "Keys: has_contact_data (0 or 1), source_field (list of strings), reason_short (string).\n\n"
+    "Title: {title}\n"
+    "Description: {description}\n"
+    "Attributes: {attributes}\n"
+)
 
 
-def build_prompt(row: pd.Series, prompt_max_chars: int = 2500) -> str:
-    title = str(row.get("ITE_ITEM_TITLE", ""))
-    desc  = str(row.get("ITE_ITEM_DESCRIPTION", ""))[:prompt_max_chars]
-    return PROMPT_TEMPLATE.format(title=title, description=desc)
+# ── Helpers de parseo ─────────────────────────────────────────────────────────
+
+def _safe_json(s) -> Optional[object]:
+    """Parsea string/dict/list sin lanzar excepciones."""
+    if s is None or (isinstance(s, float) and pd.isna(s)):
+        return None
+    if isinstance(s, (dict, list)):
+        return s
+    s = str(s).strip()
+    if not s:
+        return None
+    try:
+        return json.loads(s)
+    except Exception:
+        pass
+    try:
+        return ast.literal_eval(s)
+    except Exception:
+        return None
 
 
-def label_to_answer(result: int, explanation: str = "") -> str:
-    label = "DC-adrede" if result == 1 else "DC-negativo"
-    return json.dumps({"resultado": label, "explicacion": explanation}, ensure_ascii=False)
+def _attributes_to_text(attributes_cell, max_pairs: int = 30) -> str:
+    """Convierte la columna 'attributes' a un string 'name: val | name: val ...'"""
+    obj = _safe_json(attributes_cell)
+    if not isinstance(obj, list):
+        return ""
+    pairs = []
+    for a in obj[:max_pairs]:
+        if not isinstance(a, dict):
+            continue
+        name = a.get("attribute_name") or a.get("attribute_id")
+        val  = a.get("value_name") or a.get("value_id")
+        if name and val:
+            pairs.append(f"{name}: {val}")
+    return " | ".join(pairs)
 
+
+def _shorten_explanation(explanation_cell, max_chars: int = 220) -> str:
+    obj = _safe_json(explanation_cell)
+    if isinstance(obj, list) and obj:
+        s = str(obj[0])
+    elif obj is None:
+        s = str(explanation_cell) if explanation_cell is not None else ""
+    else:
+        s = str(obj)
+    s = re.sub(r"\s+", " ", s).strip()
+    return (s[:max_chars] + "...") if len(s) > max_chars else s
+
+
+def _parse_source_field(sf) -> list[str]:
+    sf = "" if sf is None or (isinstance(sf, float) and pd.isna(sf)) else str(sf)
+    parts = re.split(r"[,\+;/]| and ", sf)
+    out = [p.strip().title() for p in parts if p.strip()]
+    return out if out else ["Unknown"]
+
+
+# ── Selección de URLs de imágenes ─────────────────────────────────────────────
+
+def _extract_urls_from_pictures(pictures_cell) -> list[str]:
+    """Parsea la columna 'pictures' y retorna todas las URLs ordenadas por PIC_NRO."""
+    obj = _safe_json(pictures_cell)
+    if obj is None:
+        return []
+    if isinstance(obj, dict) and "pictures" in obj:
+        pics = obj["pictures"]
+    elif isinstance(obj, list):
+        pics = obj
+    else:
+        return []
+    if not isinstance(pics, list):
+        return []
+
+    def pic_key(p):
+        try:
+            return int(p.get("PIC_NRO", 10**9))
+        except Exception:
+            return 10**9
+
+    urls = []
+    for p in sorted(pics, key=lambda p: pic_key(p) if isinstance(p, dict) else 10**9):
+        if not isinstance(p, dict):
+            continue
+        u = p.get("link_pic_id") or p.get("url")
+        if isinstance(u, str) and u.startswith("http"):
+            urls.append(u)
+    return urls
+
+
+def _extract_urls_from_pictures_dp(pictures_dp_cell) -> list[str]:
+    """Parsea la columna 'pictures_dp' (imágenes con DC detectado)."""
+    obj = _safe_json(pictures_dp_cell)
+    if isinstance(obj, list):
+        return [u for u in obj if isinstance(u, str) and u.startswith("http")]
+    return []
+
+
+def _select_keep_first_last(urls: list[str], k: int = 10, seed: int = 42) -> list[str]:
+    """
+    Retorna hasta k URLs.
+    Si len(urls) > k: garantiza primera y última; muestrea k-2 del medio.
+    """
+    urls = [u for u in urls if isinstance(u, str) and u.startswith("http")]
+    if len(urls) <= k:
+        return urls
+    first, last, middle = urls[0], urls[-1], urls[1:-1]
+    rnd = random.Random(seed)
+    need = k - 2
+    picked_mid = rnd.sample(middle, min(len(middle), need))
+    mid_set = set(picked_mid)
+    picked_mid_ordered = [u for u in middle if u in mid_set]
+    return [first] + picked_mid_ordered + [last]
+
+
+def pick_image_urls(row: pd.Series, max_images: int = 10, seed: int = 42) -> list[str]:
+    """
+    Selecciona hasta max_images URLs para un listing.
+    - Positivos (RESULT=1): usa pictures_dp si existe, si no pictures.
+    - Negativos (RESULT=0): usa pictures.
+    Aplica estrategia first+last para listings con muchas imágenes.
+    """
+    is_positive = int(row.get("RESULT", 0)) == 1
+    urls = []
+
+    if is_positive:
+        dp_urls = _extract_urls_from_pictures_dp(row.get("pictures_dp"))
+        urls = dp_urls if dp_urls else _extract_urls_from_pictures(row.get("pictures"))
+    else:
+        urls = _extract_urls_from_pictures(row.get("pictures"))
+
+    return _select_keep_first_last(urls, k=max_images, seed=seed)
+
+
+# ── Descarga y guardado de imágenes ──────────────────────────────────────────
+
+def _download_image(url: str, timeout: int = 25) -> Optional[Image.Image]:
+    try:
+        r = requests.get(url, headers=HEADERS, timeout=timeout)
+        r.raise_for_status()
+        return Image.open(BytesIO(r.content)).convert("RGB")
+    except Exception:
+        return None
+
+
+def _save_resized(img: Image.Image, out_path: Path, max_side: int = 512, quality: int = 90) -> None:
+    w, h = img.size
+    scale = min(max_side / max(w, h), 1.0)
+    nw, nh = int(w * scale), int(h * scale)
+    if (nw, nh) != (w, h):
+        img = img.resize((nw, nh), Image.LANCZOS)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    img.save(out_path, format="JPEG", quality=quality, optimize=True)
+
+
+# ── Builder principal ─────────────────────────────────────────────────────────
 
 def csv_to_dataset(
     csv_path: str,
     img_dir: str,
     max_images: int = 10,
+    img_max_side: int = 512,
     prompt_max_chars: int = 2500,
+    seed: int = 42,
     limit: Optional[int] = None,
+    verbose: bool = True,
 ) -> Dataset:
     """
-    Lee un CSV de listings y construye un Dataset HF listo para training.
+    Lee un CSV de listings MeLi y construye un Dataset HF listo para training.
 
     Args:
-        csv_path: Path al CSV con columnas item_id, RESULT, etc.
-        img_dir: Directorio donde guardar las imágenes descargadas.
-        max_images: Máximo de imágenes por listing.
-        prompt_max_chars: Truncado del texto de descripción en el prompt.
-        limit: Si se especifica, usa solo las primeras N filas (para debugging).
+        csv_path       : Path al CSV con columnas item_id, RESULT, pictures, etc.
+        img_dir        : Directorio donde guardar las imágenes (persistente en Drive).
+        max_images     : Máximo de imágenes por listing.
+        img_max_side   : Lado máximo al que redimensionar (píxeles).
+        prompt_max_chars: Truncado de la descripción en el prompt.
+        seed           : Semilla para selección de imágenes.
+        limit          : Si se especifica, usa solo las primeras N filas (debugging).
+        verbose        : Imprimir progreso.
     """
     df = pd.read_csv(csv_path)
     if limit:
@@ -85,27 +221,54 @@ def csv_to_dataset(
 
     img_dir = Path(img_dir)
     records = []
+    n_no_img = 0
 
     for _, row in df.iterrows():
         item_id = str(row["item_id"])
+        urls    = pick_image_urls(row, max_images=max_images, seed=seed)
 
-        # Parsear URLs de imágenes
-        try:
-            pics = json.loads(row.get("pictures", "[]"))
-            urls = [p["url"] for p in sorted(pics, key=lambda x: x.get("PIC_NRO", 0))]
-        except Exception:
-            urls = []
+        local_paths = []
+        for i, url in enumerate(urls, start=1):
+            dest = img_dir / item_id / f"img_{i:02d}.jpg"
+            if not dest.exists():
+                img = _download_image(url)
+                if img is None:
+                    continue
+                _save_resized(img, dest, max_side=img_max_side)
+            local_paths.append(str(dest))
 
-        paths = download_images(urls, item_id, img_dir, max_images)
-        if not paths:
+        if not local_paths:
+            n_no_img += 1
             continue
 
+        title = str(row.get("ITE_ITEM_TITLE", "") or "")
+        desc  = str(row.get("ITE_ITEM_DESCRIPTION", "") or "")[:prompt_max_chars]
+        attrs = _attributes_to_text(row.get("attributes"))
+
+        prompt_text = PROMPT_TEMPLATE.format(
+            title=title, description=desc, attributes=attrs
+        )
+
+        y = int(row["RESULT"])
+        sf_list = _parse_source_field(row.get("SOURCE_FIELD"))
+        reason  = _shorten_explanation(row.get("EXPLANATION", ""))
+
+        answer = json.dumps({
+            "has_contact_data": y,
+            "source_field":     sf_list,
+            "reason_short":     reason or ("Contact data detected." if y == 1 else "No contact data detected."),
+        }, ensure_ascii=False)
+
         records.append({
-            "item_id":    item_id,
-            "image_path": paths,
-            "prompt_text": build_prompt(row, prompt_max_chars),
-            "answer":     label_to_answer(int(row["RESULT"]), str(row.get("EXPLANATION", ""))),
-            "label":      int(row["RESULT"]),
+            "item_id":     item_id,
+            "image_path":  local_paths,
+            "prompt_text": prompt_text,
+            "answer":      answer,
+            "label":       y,
         })
+
+    if verbose:
+        print(f"  Ejemplos construidos : {len(records):,}")
+        print(f"  Sin imágenes (skip)  : {n_no_img:,}")
 
     return Dataset.from_list(records)
