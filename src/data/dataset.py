@@ -223,6 +223,10 @@ def csv_to_dataset(
     records = []
     n_no_img = 0
 
+    # Columnas de auditoría presentes en los CSVs reales (no se usan en training)
+    # RESULT_4_1_MINI, RESULT_4_1, tiene_41 → se ignoran, el label es RESULT
+    # EXPLANATION ya contiene la explicación del mejor modelo disponible (4.1 > Mini)
+
     for _, row in df.iterrows():
         item_id = str(row["item_id"])
         urls    = pick_image_urls(row, max_images=max_images, seed=seed)

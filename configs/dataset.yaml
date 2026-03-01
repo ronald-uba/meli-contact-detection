@@ -2,26 +2,31 @@ seed: 42
 
 pools:
   raw:
-    file: "raw_100k.csv"
+    file: "dataset_final_100k_sample.csv"
     total: 100000
     dc_rate: 0.015
     train: 49000
     val:   21000
     test:  30000
+    # Contenido: muestra representativa del universo.
+    # Incluye: Mini=0 (negativos limpios) + Mini=1/4.1=0 (Mini se equivocó)
 
   positive:
-    file: "positives_14k.csv"
+    file: "dataset_final_14k_result_1.csv"
     total: 14000
     train: 13000
     val:   1000
     test:  0          # test usa SOLO raw, sin enriquecimiento
+    # Contenido: casos donde Mini=1 Y 4.1=1 → positivos de alta confianza
 
   hard_negative:
-    file: "hard_negatives_7k.csv"
+    file: "dataset_final_7k_result_0.csv"
     total: 7000
     train: 4900
     val:   2100
     test:  0          # test usa SOLO raw, sin enriquecimiento
+    # Contenido: casos donde Mini=1 PERO 4.1=0 → falsos positivos del modelo chico
+    # → negativos difíciles ideales para entrenar robustez
 
 # Valores esperados para validación automática en build_splits.py
 expected:
