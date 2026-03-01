@@ -40,6 +40,21 @@ def decide(
         return Decision(item_id=item_id, raw_label=None, is_dc=False,
                         confidence="parse_error", explanation=None)
 
+    # ── Schema nuevo: has_contact_data / source_field / reason_short ──────────
+    if "has_contact_data" in parsed:
+        hcd = parsed.get("has_contact_data")
+        try:
+            is_dc = bool(int(hcd))
+        except (TypeError, ValueError):
+            return Decision(item_id=item_id, raw_label=str(hcd), is_dc=False,
+                            confidence="parse_error", explanation=None)
+        raw_label  = "DC" if is_dc else "no-DC"
+        expl       = (parsed.get("reason_short") or "").strip()
+        confidence = "high" if (not require_explanation or expl) else "low"
+        return Decision(item_id=item_id, raw_label=raw_label, is_dc=is_dc,
+                        confidence=confidence, explanation=expl or None)
+
+    # ── Schema legacy: resultado / explicacion ────────────────────────────────
     label = parsed.get("resultado", "").strip()
     expl  = parsed.get("explicacion", "").strip()
 
