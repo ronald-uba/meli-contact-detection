@@ -217,7 +217,7 @@ def csv_to_dataset(
         limit          : Si se especifica, usa solo las primeras N filas (debugging).
         verbose        : Imprimir progreso.
     """
-    df = read_pool_csv(csv_path)
+    df = pd.read_csv(csv_path)
     if limit:
         df = df.head(limit)
 
