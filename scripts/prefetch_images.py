@@ -21,7 +21,9 @@ Uso desde Colab:
 import argparse
 import random
 import sys
+import threading
 import time
+from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from io import BytesIO
 from pathlib import Path
@@ -85,41 +87,69 @@ def prefetch_split(
     df = pd.read_csv(csv_path)
     print(f"\n[{split_name}] {len(df):,} filas")
 
-    # Construir lista completa de (url, dest)
-    tasks = []
+    # Construir lista completa de (url, dest, item_id)
+    tasks: list[tuple[str, Path, str]] = []
     for _, row in df.iterrows():
         item_id = str(row["item_id"])
         urls = pick_image_urls(row, max_images=10, seed=seed)
         for i, url in enumerate(urls, start=1):
             dest = output_dir / split_name / item_id / f"img_{i:02d}.jpg"
-            tasks.append((url, dest))
+            tasks.append((url, dest, item_id))
 
-    already = sum(1 for _, dest in tasks if dest.exists())
-    pending = [(url, dest) for url, dest in tasks if not dest.exists()]
+    total_listings = len(df)
+    already_imgs   = sum(1 for _, dest, _ in tasks if dest.exists())
+    pending        = [(url, dest, iid) for url, dest, iid in tasks if not dest.exists()]
 
+    # Listings sin ninguna imagen pendiente (ya completas)
+    pending_ids = {iid for _, _, iid in pending}
+    listings_already_done = total_listings - len(pending_ids)
+
+    print(f"  Total listings  : {total_listings:,}")
     print(f"  Total imágenes  : {len(tasks):,}")
-    print(f"  Ya en Drive     : {already:,}")
+    print(f"  Ya en Drive     : {already_imgs:,}")
     print(f"  Por descargar   : {len(pending):,}")
 
     if not pending:
         print("  ✓ Nada que descargar.")
         return
 
-    failed_urls = []
+    # Cuántas imágenes pendientes tiene cada listing
+    listing_pending_count: dict[str, int] = defaultdict(int)
+    for _, _, iid in pending:
+        listing_pending_count[iid] += 1
+
+    lock = threading.Lock()
+    listing_finished: dict[str, int] = defaultdict(int)
+    listings_complete = [listings_already_done]
+    report_every = max(1, total_listings // 20)  # print cada ~5%
+
+    failed_urls: list[str] = []
     with ThreadPoolExecutor(max_workers=workers) as executor:
         futures = {
-            executor.submit(_download_one, url, dest, max_retries, max_side): url
-            for url, dest in pending
+            executor.submit(_download_one, url, dest, max_retries, max_side): (url, iid)
+            for url, dest, iid in pending
         }
         with tqdm(total=len(pending), desc=split_name, unit="img") as pbar:
             for future in as_completed(futures):
-                url = futures[future]
+                url, iid = futures[future]
                 if not future.result():
                     failed_urls.append(url)
+
+                with lock:
+                    listing_finished[iid] += 1
+                    if listing_finished[iid] == listing_pending_count[iid]:
+                        listings_complete[0] += 1
+                        if listings_complete[0] % report_every == 0:
+                            pct = listings_complete[0] / total_listings * 100
+                            pbar.write(
+                                f"  Listings procesadas: {listings_complete[0]:,} / "
+                                f"{total_listings:,} ({pct:.0f}%)"
+                            )
                 pbar.update(1)
 
-    ok = len(pending) - len(failed_urls)
-    print(f"  ✓ Descargadas   : {ok:,}")
+    print(f"  Listings procesadas: {listings_complete[0]:,} / {total_listings:,} "
+          f"({listings_complete[0] / total_listings * 100:.0f}%)")
+    print(f"  ✓ Imágenes ok   : {len(pending) - len(failed_urls):,}")
     if failed_urls:
         print(f"  ✗ Fallidas      : {len(failed_urls):,}")
         log = output_dir / f"failed_{split_name}.txt"
