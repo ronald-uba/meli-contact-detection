@@ -15,9 +15,8 @@ Detectar si una publicación de MeLi contiene datos de contacto (teléfonos, Wha
 
 | Label | Descripción |
 |-------|-------------|
-| `DC-adrede` | Datos de contacto intencionales |
-| `DC-involuntario` | Datos de contacto no intencionales |
-| `DC-negativo` | Sin datos de contacto |
+| `DC` | Publicación con datos de contacto (positivo) |
+| `no-DC` | Publicación sin datos de contacto (negativo) |
 
 ## Estructura
 
