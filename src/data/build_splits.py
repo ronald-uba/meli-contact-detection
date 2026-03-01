@@ -18,6 +18,8 @@ import pandas as pd
 import yaml
 from sklearn.model_selection import train_test_split
 
+from src.data.csv_reader import read_pool_csv
+
 
 def load_config(config_path: str) -> dict:
     with open(config_path) as f:
@@ -34,10 +36,17 @@ def build_splits(config_path: str, pools_dir: str, output_dir: str) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # ── Cargar pools ──────────────────────────────────────────────────────────
+    # Usamos csv_reader porque los CSVs tienen comillas sin escapar en campos JSON
     print("Cargando pools...")
-    raw      = pd.read_csv(pools_dir / cfg["pools"]["raw"]["file"])
-    pos      = pd.read_csv(pools_dir / cfg["pools"]["positive"]["file"])
-    hard_neg = pd.read_csv(pools_dir / cfg["pools"]["hard_negative"]["file"])
+    def load_pool(path):
+        df = read_pool_csv(path)
+        df = df.dropna(subset=[label_col])
+        df = df[df[label_col].isin([0, 1])]
+        return df.reset_index(drop=True)
+
+    raw      = load_pool(pools_dir / cfg["pools"]["raw"]["file"])
+    pos      = load_pool(pools_dir / cfg["pools"]["positive"]["file"])
+    hard_neg = load_pool(pools_dir / cfg["pools"]["hard_negative"]["file"])
 
     print(f"  raw      : {len(raw):>7,} filas  ({raw[label_col].mean():.2%} DC)")
     print(f"  positivos: {len(pos):>7,} filas  ({pos[label_col].mean():.2%} DC)")
@@ -65,14 +74,16 @@ def build_splits(config_path: str, pools_dir: str, output_dir: str) -> None:
     # ── Dividir pool de positivos ─────────────────────────────────────────────
     # Todos son DC=1 → no hace falta estratificar
     pos_cfg = cfg["pools"]["positive"]
-    pos_train = pos.sample(n=pos_cfg["train"], random_state=seed)
-    pos_val   = pos.drop(pos_train.index).sample(n=pos_cfg["val"], random_state=seed)
+    pos_train = pos.sample(n=min(pos_cfg["train"], len(pos)), random_state=seed)
+    pos_remaining = pos.drop(pos_train.index)
+    pos_val = pos_remaining.sample(n=min(pos_cfg["val"], len(pos_remaining)), random_state=seed)
 
     # ── Dividir hard negatives ────────────────────────────────────────────────
     # Todos son DC=0 → no hace falta estratificar
     hn_cfg = cfg["pools"]["hard_negative"]
-    hn_train = hard_neg.sample(n=hn_cfg["train"], random_state=seed)
-    hn_val   = hard_neg.drop(hn_train.index).sample(n=hn_cfg["val"], random_state=seed)
+    hn_train = hard_neg.sample(n=min(hn_cfg["train"], len(hard_neg)), random_state=seed)
+    hn_remaining = hard_neg.drop(hn_train.index)
+    hn_val = hn_remaining.sample(n=min(hn_cfg["val"], len(hn_remaining)), random_state=seed)
 
     # ── Concatenar y shufflear ────────────────────────────────────────────────
     train = (pd.concat([raw_train, pos_train, hn_train])

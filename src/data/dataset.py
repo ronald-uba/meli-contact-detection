@@ -18,6 +18,8 @@ import requests
 from datasets import Dataset
 from PIL import Image
 
+from src.data.csv_reader import read_pool_csv
+
 
 # ── Constantes ────────────────────────────────────────────────────────────────
 
@@ -215,7 +217,7 @@ def csv_to_dataset(
         limit          : Si se especifica, usa solo las primeras N filas (debugging).
         verbose        : Imprimir progreso.
     """
-    df = pd.read_csv(csv_path)
+    df = read_pool_csv(csv_path)
     if limit:
         df = df.head(limit)
 

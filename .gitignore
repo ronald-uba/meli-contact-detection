@@ -14,8 +14,8 @@ env/
 .ipynb_checkpoints/
 *.ipynb_checkpoints
 
-# Data (never commit raw data or splits)
-data/
+# Data (never commit raw data or splits — solo la carpeta raíz /data/)
+/data/
 *.csv
 *.jsonl
 *.parquet

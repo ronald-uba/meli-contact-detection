@@ -29,19 +29,20 @@ pools:
     # → negativos difíciles ideales para entrenar robustez
 
 # Valores esperados para validación automática en build_splits.py
+# Nota: ~1,250 filas descartadas por RESULT no parseables (CSV malformado)
 expected:
   train:
-    total:     66900
-    dc_rate:   0.2053
-    positives: 13735  # 49k*0.015 + 13k = 735 + 13000
+    total:     65964
+    dc_rate:   0.2036
+    positives: 13431  # ~48345*0.0087 + 13000
   val:
-    total:     24100
-    dc_rate:   0.0546
-    positives: 1315   # 21k*0.015 + 1k = 315 + 1000
+    total:     23773
+    dc_rate:   0.0407
+    positives: 967    # ~20988*0.0087 + 785
   test:
     total:     30000
-    dc_rate:   0.015
-    positives: 450    # 30k*0.015
+    dc_rate:   0.0087
+    positives: 261    # 30k*0.0087
 
 # ADVERTENCIA: test.csv no debe usarse hasta Sprint 10
 test_locked: true
