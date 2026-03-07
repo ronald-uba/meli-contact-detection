@@ -198,12 +198,18 @@ def _save_resized(img: Image.Image, out_path: Path, max_side: int = 512, quality
 def _download_one(args: tuple) -> Optional[str]:
     """Descarga y guarda una imagen. Retorna el path local o None si falla."""
     url, dest, img_max_side = args
-    if dest.exists():
-        return str(dest)
+    try:
+        if dest.exists():
+            return str(dest)
+    except OSError:
+        pass  # Drive FUSE I/O error — intentar descargar igual
     img = _download_image(url)
     if img is None:
         return None
-    _save_resized(img, dest, max_side=img_max_side)
+    try:
+        _save_resized(img, dest, max_side=img_max_side)
+    except OSError:
+        return None
     return str(dest)
 
 
