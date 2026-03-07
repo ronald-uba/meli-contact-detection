@@ -9,6 +9,7 @@ import ast
 import json
 import random
 import re
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from io import BytesIO
 from pathlib import Path
 from typing import Optional
@@ -194,6 +195,18 @@ def _save_resized(img: Image.Image, out_path: Path, max_side: int = 512, quality
 
 # ── Builder principal ─────────────────────────────────────────────────────────
 
+def _download_one(args: tuple) -> Optional[str]:
+    """Descarga y guarda una imagen. Retorna el path local o None si falla."""
+    url, dest, img_max_side = args
+    if dest.exists():
+        return str(dest)
+    img = _download_image(url)
+    if img is None:
+        return None
+    _save_resized(img, dest, max_side=img_max_side)
+    return str(dest)
+
+
 def csv_to_dataset(
     csv_path: str,
     img_dir: str,
@@ -202,51 +215,83 @@ def csv_to_dataset(
     prompt_max_chars: int = 2500,
     seed: int = 42,
     limit: Optional[int] = None,
+    n_download_workers: int = 16,
     verbose: bool = True,
 ) -> Dataset:
     """
     Lee un CSV de listings MeLi y construye un Dataset HF listo para training.
 
     Args:
-        csv_path       : Path al CSV con columnas item_id, RESULT, pictures, etc.
-        img_dir        : Directorio donde guardar las imágenes (persistente en Drive).
-        max_images     : Máximo de imágenes por listing.
-        img_max_side   : Lado máximo al que redimensionar (píxeles).
-        prompt_max_chars: Truncado de la descripción en el prompt.
-        seed           : Semilla para selección de imágenes.
-        limit          : Si se especifica, usa solo las primeras N filas (debugging).
-        verbose        : Imprimir progreso.
+        csv_path            : Path al CSV con columnas item_id, RESULT, pictures, etc.
+        img_dir             : Directorio donde guardar las imágenes (persistente en Drive).
+        max_images          : Máximo de imágenes por listing.
+        img_max_side        : Lado máximo al que redimensionar (píxeles).
+        prompt_max_chars    : Truncado de la descripción en el prompt.
+        seed                : Semilla para selección de imágenes.
+        limit               : Si se especifica, usa solo las primeras N filas (debugging).
+        n_download_workers  : Threads para descarga paralela de imágenes.
+        verbose             : Imprimir progreso.
     """
     df = pd.read_csv(csv_path)
     if limit:
         df = df.head(limit)
 
     img_dir = Path(img_dir)
-    records = []
-    n_no_img = 0
 
     # Columnas de auditoría presentes en los CSVs reales (no se usan en training)
     # RESULT_4_1_MINI, RESULT_4_1, tiene_41 → se ignoran, el label es RESULT
     # EXPLANATION ya contiene la explicación del mejor modelo disponible (4.1 > Mini)
 
+    # ── Fase 1: recopilar todas las tareas de descarga ────────────────────────
+    # tasks[item_id] = [(url, dest, img_max_side), ...]
+    tasks_by_item: dict[str, list[tuple]] = {}
+    rows_by_item: dict[str, pd.Series] = {}
+
     for _, row in df.iterrows():
         item_id = str(row["item_id"])
         urls    = pick_image_urls(row, max_images=max_images, seed=seed)
+        tasks   = [
+            (url, img_dir / item_id / f"img_{i:02d}.jpg", img_max_side)
+            for i, url in enumerate(urls, start=1)
+        ]
+        tasks_by_item[item_id] = tasks
+        rows_by_item[item_id]  = row
 
-        local_paths = []
-        for i, url in enumerate(urls, start=1):
-            dest = img_dir / item_id / f"img_{i:02d}.jpg"
-            if not dest.exists():
-                img = _download_image(url)
-                if img is None:
-                    continue
-                _save_resized(img, dest, max_side=img_max_side)
-            local_paths.append(str(dest))
+    # ── Fase 2: descargar en paralelo ─────────────────────────────────────────
+    all_tasks = [(url, dest, ms) for tasks in tasks_by_item.values() for url, dest, ms in tasks]
+    n_total   = len(all_tasks)
+    n_cached  = sum(1 for _, dest, _ in all_tasks if dest.exists())
+
+    if verbose:
+        print(f"  Imágenes a descargar : {n_total - n_cached:,}  (en caché: {n_cached:,})")
+
+    results_by_dest: dict[str, Optional[str]] = {}
+    with ThreadPoolExecutor(max_workers=n_download_workers) as pool:
+        futures = {pool.submit(_download_one, t): t[1] for t in all_tasks}
+        done = 0
+        for fut in as_completed(futures):
+            dest = futures[fut]
+            results_by_dest[str(dest)] = fut.result()
+            done += 1
+            if verbose and done % 1000 == 0:
+                print(f"    {done:,}/{n_total:,} imágenes procesadas...")
+
+    # ── Fase 3: construir registros ────────────────────────────────────────────
+    records = []
+    n_no_img = 0
+
+    for item_id, tasks in tasks_by_item.items():
+        local_paths = [
+            results_by_dest[str(dest)]
+            for _, dest, _ in tasks
+            if results_by_dest.get(str(dest)) is not None
+        ]
 
         if not local_paths:
             n_no_img += 1
             continue
 
+        row   = rows_by_item[item_id]
         title = str(row.get("ITE_ITEM_TITLE", "") or "")
         desc  = str(row.get("ITE_ITEM_DESCRIPTION", "") or "")[:prompt_max_chars]
         attrs = _attributes_to_text(row.get("attributes"))
