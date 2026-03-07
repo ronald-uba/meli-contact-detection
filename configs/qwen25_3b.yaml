@@ -11,12 +11,13 @@ peft:
   target_modules: "all-linear"
 
 training:
-  per_device_train_batch_size: 1
-  per_device_eval_batch_size: 1
-  gradient_accumulation_steps: 8
+  per_device_train_batch_size: 4
+  per_device_eval_batch_size: 4
+  gradient_accumulation_steps: 4
   num_train_epochs: 3
   learning_rate: 2.0e-4
-  fp16: true
+  fp16: false
+  bf16: true   # A100/L4 native — más rápido y estable que fp16
   logging_steps: 2
   eval_strategy: "steps"
   eval_steps: 10
