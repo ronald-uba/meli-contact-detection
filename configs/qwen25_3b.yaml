@@ -25,6 +25,7 @@ training:
   save_total_limit: 1
   report_to: "none"
   remove_unused_columns: false
+  seed: 42
 
 data:
   max_images: 10
