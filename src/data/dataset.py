@@ -291,7 +291,17 @@ def csv_to_dataset(
     # ── Fase 2: descargar en paralelo ─────────────────────────────────────────
     all_tasks = [(url, dest, ms) for tasks in tasks_by_item.values() for url, dest, ms in tasks]
     n_total   = len(all_tasks)
-    n_cached  = sum(1 for _, dest, _ in all_tasks if dest.exists())
+
+    # Chequeo de caché en paralelo (Drive FUSE: ~8ms/stat × 660k = 90min secuencial → <2min paralelo)
+    def _exists(dest):
+        try:
+            return dest.exists()
+        except OSError:
+            return False
+
+    with ThreadPoolExecutor(max_workers=n_download_workers) as _pool:
+        _exist_flags = list(_pool.map(_exists, [dest for _, dest, _ in all_tasks]))
+    n_cached = sum(_exist_flags)
 
     if verbose:
         print(f"  Imágenes a descargar : {n_total - n_cached:,}  (en caché: {n_cached:,})")
