@@ -28,6 +28,6 @@ training:
 
 data:
   max_images: 10
-  img_max_side: 512
+  img_max_side: 336
   prompt_max_chars: 2500
   seed: 42
