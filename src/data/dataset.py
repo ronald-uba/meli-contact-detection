@@ -278,7 +278,8 @@ def csv_to_dataset(
     tasks_by_item: dict[str, list[tuple]] = {}
     rows_by_item: dict[str, pd.Series] = {}
 
-    for _, row in df.iterrows():
+    n_rows = len(df)
+    for i, (_, row) in enumerate(df.iterrows()):
         item_id = str(row["item_id"])
         urls    = pick_image_urls(row, max_images=max_images, seed=seed)
         tasks   = [
@@ -287,19 +288,29 @@ def csv_to_dataset(
         ]
         tasks_by_item[item_id] = tasks
         rows_by_item[item_id]  = row
+        if verbose and (i + 1) % 10_000 == 0:
+            print(f"  Fase 1: {i + 1:,}/{n_rows:,} filas procesadas...")
+
+    if verbose:
+        print(f"  Fase 1 completa: {len(tasks_by_item):,} items, {sum(len(t) for t in tasks_by_item.values()):,} tareas")
 
     # ── Fase 2: descargar en paralelo ─────────────────────────────────────────
     all_tasks = [(url, dest, ms) for tasks in tasks_by_item.values() for url, dest, ms in tasks]
     n_total   = len(all_tasks)
 
     # Chequeo de caché en paralelo (Drive FUSE: ~8ms/stat × 660k = 90min secuencial → <2min paralelo)
+    # Usa 32 workers para maximizar concurrencia en operaciones I/O-bound
+    _cache_workers = max(32, n_download_workers)
+    if verbose:
+        print(f"  Chequeando caché ({n_total:,} paths, {_cache_workers} workers)...")
+
     def _exists(dest):
         try:
             return dest.exists()
         except OSError:
             return False
 
-    with ThreadPoolExecutor(max_workers=n_download_workers) as _pool:
+    with ThreadPoolExecutor(max_workers=_cache_workers) as _pool:
         _exist_flags = list(_pool.map(_exists, [dest for _, dest, _ in all_tasks]))
     n_cached = sum(_exist_flags)
 
